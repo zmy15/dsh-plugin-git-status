@@ -33,6 +33,16 @@ window.__ModuleLoader__.load({
       'chip.unborn': 'Unborn branch',
       'chip.unknown': 'Unknown branch',
       'chip.error': 'Git unavailable',
+      'chip.branchMenu': 'Switch branch',
+      'chip.details': 'Git status details',
+      'branch.title': 'Branches',
+      'branch.local': 'Local',
+      'branch.search': 'Search {name} branches',
+      'branch.create': 'Create and checkout branch…',
+      'branch.createLabel': 'Create and checkout {branch}',
+      'branch.empty': 'No matching branches',
+      'branch.loading': 'Loading branches…',
+      'branch.current': 'Current branch',
       'popover.title': 'Git status',
       'popover.close': 'Close',
       'popover.repo': 'Repository',
@@ -74,6 +84,16 @@ window.__ModuleLoader__.load({
       'chip.unborn': '未出生分支',
       'chip.unknown': '未知分支',
       'chip.error': 'Git 不可用',
+      'chip.branchMenu': '切换分支',
+      'chip.details': 'Git 状态详情',
+      'branch.title': '分支',
+      'branch.local': '本地',
+      'branch.search': '搜索 {name} 分支',
+      'branch.create': '创建并检出分支…',
+      'branch.createLabel': '创建并检出 {branch}',
+      'branch.empty': '没有匹配的分支',
+      'branch.loading': '正在读取分支…',
+      'branch.current': '当前分支',
       'popover.title': 'Git 状态',
       'popover.close': '关闭',
       'popover.repo': '仓库',
@@ -136,6 +156,47 @@ window.__ModuleLoader__.load({
       return payload.value ?? null;
     }
 
+    /**
+     * List local branches for one live session.
+     * @param {string} sessionId - live session id.
+     * @returns {Promise<object|null>} branch snapshot, or null outside a repository.
+     */
+    async function fetchBranches(sessionId) {
+      const response = await fetch(`/git-status/branches?sessionId=${encodeURIComponent(sessionId)}`, {
+        headers: { accept: 'application/json' },
+        cache: 'no-store',
+      });
+      if (!response.ok) throw new Error(`Branch list request failed (${response.status})`);
+      const payload = await response.json();
+      if (payload === null || typeof payload !== 'object') throw new Error('Malformed branch response');
+      if (!payload.ok) throw new Error(payload.error?.message ?? 'Branch list unavailable');
+      return payload.value ?? null;
+    }
+
+    /**
+     * Switch to a branch, optionally creating it first.
+     * @param {string} sessionId - live session id.
+     * @param {string} branch - local branch name.
+     * @param {boolean} create - create before switching.
+     * @returns {Promise<object>} mutation result, including the refreshed status.
+     */
+    async function changeBranch(sessionId, branch, create) {
+      const response = await fetch('/git-status/branch', {
+        method: 'POST',
+        headers: {
+          accept: 'application/json',
+          'content-type': 'application/json',
+        },
+        cache: 'no-store',
+        body: JSON.stringify({ sessionId, branch, create: create === true }),
+      });
+      if (!response.ok) throw new Error(`Branch switch request failed (${response.status})`);
+      const payload = await response.json();
+      if (payload === null || typeof payload !== 'object') throw new Error('Malformed branch switch response');
+      if (!payload.ok) throw new Error(payload.error?.message ?? 'Branch switch failed');
+      return payload.value;
+    }
+
     /** Small branch glyph. */
     function BranchGlyph({ size = 14 }) {
       return h(
@@ -196,6 +257,41 @@ window.__ModuleLoader__.load({
       );
     }
 
+    /** Search glyph for the branch picker. */
+    function SearchGlyph({ size = 14 }) {
+      return h(
+        'svg',
+        { width: size, height: size, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true' },
+        h('circle', {
+          cx: 6.8,
+          cy: 6.8,
+          r: 4.3,
+          stroke: 'currentColor',
+          strokeWidth: 1.4,
+        }),
+        h('path', {
+          d: 'M10 10l3.2 3.2',
+          stroke: 'currentColor',
+          strokeWidth: 1.4,
+          strokeLinecap: 'round',
+        }),
+      );
+    }
+
+    /** Plus glyph for branch creation. */
+    function PlusGlyph({ size = 14 }) {
+      return h(
+        'svg',
+        { width: size, height: size, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true' },
+        h('path', {
+          d: 'M8 3.2v9.6M3.2 8h9.6',
+          stroke: 'currentColor',
+          strokeWidth: 1.45,
+          strokeLinecap: 'round',
+        }),
+      );
+    }
+
     /**
      * Format an ISO instant relative to now. Falls back to a local date when
      * Intl.RelativeTimeFormat is unavailable.
@@ -244,6 +340,13 @@ window.__ModuleLoader__.load({
       const [status, setStatus] = React.useState(undefined);
       const [error, setError] = React.useState('');
       const [open, setOpen] = React.useState(false);
+      const [menuOpen, setMenuOpen] = React.useState(false);
+      const [branches, setBranches] = React.useState([]);
+      const [branchesLoading, setBranchesLoading] = React.useState(false);
+      const [branchError, setBranchError] = React.useState('');
+      const [branchQuery, setBranchQuery] = React.useState('');
+      const [newBranch, setNewBranch] = React.useState('');
+      const [branchBusy, setBranchBusy] = React.useState('');
       const [refreshing, setRefreshing] = React.useState(false);
       const rootRef = React.useRef(null);
       const buttonRef = React.useRef(null);
@@ -266,6 +369,22 @@ window.__ModuleLoader__.load({
         },
         [sessionId],
       );
+
+      const loadBranches = React.useCallback(async () => {
+        if (typeof sessionId !== 'string' || sessionId === '') return;
+        setBranchesLoading(true);
+        try {
+          const snapshot = await fetchBranches(sessionId);
+          if (!aliveRef.current) return;
+          setBranches(Array.isArray(snapshot?.branches) ? snapshot.branches : []);
+          setBranchError('');
+        } catch (cause) {
+          if (!aliveRef.current) return;
+          setBranchError(cause instanceof Error ? cause.message : String(cause));
+        } finally {
+          if (aliveRef.current) setBranchesLoading(false);
+        }
+      }, [sessionId]);
 
       // Initial read, focus/visibility refresh, and a slow visible-page poll.
       React.useEffect(() => {
@@ -315,16 +434,18 @@ window.__ModuleLoader__.load({
 
       // Dismiss on outside pointer or Escape.
       React.useEffect(() => {
-        if (!open) return undefined;
+        if (!open && !menuOpen) return undefined;
         const onPointer = (event) => {
           const root = rootRef.current;
           if (root !== null && event.target instanceof Node && !root.contains(event.target)) {
             setOpen(false);
+            setMenuOpen(false);
           }
         };
         const onKey = (event) => {
           if (event.key === 'Escape') {
             setOpen(false);
+            setMenuOpen(false);
             buttonRef.current?.focus?.();
           }
         };
@@ -334,7 +455,7 @@ window.__ModuleLoader__.load({
           document.removeEventListener('pointerdown', onPointer, true);
           document.removeEventListener('keydown', onKey);
         };
-      }, [open]);
+      }, [open, menuOpen]);
 
       const className = placement === 'hero' ? 'gs-root gs-hero-dock' : 'gs-root';
 
@@ -376,7 +497,8 @@ window.__ModuleLoader__.load({
       if (behind > 0) titleParts.push(t('chip.behind', { count: behind }));
       const title = titleParts.join(' · ');
 
-      const toggle = () => {
+      const toggleDetails = () => {
+        setMenuOpen(false);
         if (open) {
           setOpen(false);
           return;
@@ -388,6 +510,19 @@ window.__ModuleLoader__.load({
         });
       };
 
+      const toggleBranches = () => {
+        setOpen(false);
+        if (menuOpen) {
+          setMenuOpen(false);
+          return;
+        }
+        setMenuOpen(true);
+        setBranchQuery('');
+        setNewBranch('');
+        setBranchError('');
+        loadBranches();
+      };
+
       const onRefresh = () => {
         setRefreshing(true);
         refresh(true).finally(() => {
@@ -395,40 +530,111 @@ window.__ModuleLoader__.load({
         });
       };
 
+      const selectBranch = async (name) => {
+        if (branchBusy !== '' || name === status.branch) return;
+        setBranchBusy(name);
+        setBranchError('');
+        try {
+          const result = await changeBranch(sessionId, name, false);
+          if (!aliveRef.current) return;
+          if (result?.status !== undefined && result.status !== null) setStatus(result.status);
+          setError(result?.statusError?.message ?? '');
+          setMenuOpen(false);
+        } catch (cause) {
+          if (!aliveRef.current) return;
+          setBranchError(cause instanceof Error ? cause.message : String(cause));
+        } finally {
+          if (aliveRef.current) setBranchBusy('');
+        }
+      };
+
+      const createBranch = async (name) => {
+        const branch = name.trim();
+        if (branch === '' || branchBusy !== '') return;
+        setBranchBusy('create');
+        setBranchError('');
+        try {
+          const result = await changeBranch(sessionId, branch, true);
+          if (!aliveRef.current) return;
+          if (result?.status !== undefined && result.status !== null) setStatus(result.status);
+          setError(result?.statusError?.message ?? '');
+          setNewBranch('');
+          setMenuOpen(false);
+        } catch (cause) {
+          if (!aliveRef.current) return;
+          setBranchError(cause instanceof Error ? cause.message : String(cause));
+        } finally {
+          if (aliveRef.current) setBranchBusy('');
+        }
+      };
+
       return h(
         'div',
         { className, ref: rootRef },
         h(
-          'button',
-          {
-            type: 'button',
-            ref: buttonRef,
-            className: 'gs-chip',
-            onClick: toggle,
-            'aria-haspopup': 'dialog',
-            'aria-expanded': open,
-            'aria-label': title,
-            title,
-          },
-          h(BranchGlyph, { size: 14 }),
-          h('span', { className: 'gs-branch' }, branchLabel),
-          changed > 0
-            ? h(
-                'span',
-                { className: 'gs-dirty', 'aria-hidden': 'true' },
-                h('span', { className: 'gs-dot' }),
-                h('span', null, String(changed)),
-              )
-            : h(
-                'span',
-                { className: 'gs-clean', title: t('chip.clean') },
-                h(CheckGlyph, { size: 12 }),
-                h('span', { className: 'gs-sr-only' }, t('chip.clean')),
-              ),
-          ahead > 0 ? h('span', { className: 'gs-sync', 'aria-hidden': 'true' }, `↑${ahead}`) : null,
-          behind > 0 ? h('span', { className: 'gs-sync', 'aria-hidden': 'true' }, `↓${behind}`) : null,
-          h('span', { className: 'gs-chevron' }, h(ChevronGlyph, { open })),
+          'div',
+          { className: 'gs-chip' },
+          h(
+            'button',
+            {
+              type: 'button',
+              ref: buttonRef,
+              className: 'gs-branch-trigger',
+              onClick: toggleBranches,
+              'aria-haspopup': 'menu',
+              'aria-expanded': menuOpen,
+              'aria-label': `${t('chip.branchMenu')}: ${branchLabel}`,
+              title: t('chip.branchMenu'),
+            },
+            h(BranchGlyph, { size: 14 }),
+            h('span', { className: 'gs-branch' }, branchLabel),
+            h('span', { className: 'gs-chevron' }, h(ChevronGlyph, { open: menuOpen })),
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'gs-status-trigger',
+              onClick: toggleDetails,
+              'aria-haspopup': 'dialog',
+              'aria-expanded': open,
+              'aria-label': `${t('chip.details')}: ${title}`,
+              title,
+            },
+            changed > 0
+              ? h(
+                  'span',
+                  { className: 'gs-dirty', 'aria-hidden': 'true' },
+                  h('span', { className: 'gs-dot' }),
+                  h('span', null, String(changed)),
+                )
+              : h(
+                  'span',
+                  { className: 'gs-clean', title: t('chip.clean') },
+                  h(CheckGlyph, { size: 12 }),
+                  h('span', { className: 'gs-sr-only' }, t('chip.clean')),
+                ),
+            ahead > 0 ? h('span', { className: 'gs-sync', 'aria-hidden': 'true' }, `↑${ahead}`) : null,
+            behind > 0 ? h('span', { className: 'gs-sync', 'aria-hidden': 'true' }, `↓${behind}`) : null,
+          ),
         ),
+        menuOpen
+          ? h(GitBranchMenu, {
+              status,
+              branches,
+              loading: branchesLoading,
+              query: branchQuery,
+              setQuery: setBranchQuery,
+              newBranch,
+              setNewBranch,
+              busy: branchBusy,
+              error: branchError,
+              t,
+              onSelect: selectBranch,
+              onCreate: createBranch,
+              onRetry: loadBranches,
+            })
+          : null,
         open
           ? h(GitStatusPopover, {
               status,
@@ -443,6 +649,124 @@ window.__ModuleLoader__.load({
               },
             })
           : null,
+      );
+    }
+
+    /** Searchable local-branch picker with an inline create-and-switch row. */
+    function GitBranchMenu({
+      status,
+      branches,
+      loading,
+      query,
+      setQuery,
+      newBranch,
+      setNewBranch,
+      busy,
+      error,
+      t,
+      onSelect,
+      onCreate,
+    }) {
+      const needle = query.trim().toLowerCase();
+      const filtered = needle === ''
+        ? branches
+        : branches.filter((branch) => branch.name.toLowerCase().includes(needle));
+      const current = status.branch || branches.find((branch) => branch.current)?.name || '';
+      const pending = busy !== '';
+
+      const submitCreate = (event) => {
+        event.preventDefault();
+        if (!pending && newBranch.trim() !== '') onCreate(newBranch);
+      };
+
+      return h(
+        'div',
+        {
+          className: 'gs-popover gs-branch-menu',
+          role: 'dialog',
+          'aria-label': t('branch.title'),
+          'aria-modal': 'false',
+        },
+        h(
+          'label',
+          { className: 'gs-branch-search' },
+          h(SearchGlyph, { size: 14 }),
+          h('input', {
+            type: 'search',
+            value: query,
+            autoFocus: true,
+            placeholder: t('branch.search', { name: status.name || t('popover.repo') }),
+            onChange: (event) => setQuery(event.target.value),
+          }),
+        ),
+        h(
+          'div',
+          { className: 'gs-branch-heading' },
+          h('span', null, t('branch.title')),
+          h('span', { className: 'gs-branch-local' }, t('branch.local')),
+        ),
+        h(
+          'div',
+          { className: 'gs-branch-list', role: 'listbox', 'aria-label': t('branch.title') },
+          loading
+            ? h('div', { className: 'gs-branch-state' }, t('branch.loading'))
+            : filtered.length === 0
+              ? h('div', { className: 'gs-branch-state' }, t('branch.empty'))
+              : filtered.map((branch) =>
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      key: branch.name,
+                      className: 'gs-branch-row',
+                      role: 'option',
+                      'aria-selected': branch.name === current,
+                      'aria-current': branch.name === current ? 'true' : undefined,
+                      disabled: pending,
+                      onClick: () => onSelect(branch.name),
+                    },
+                    h(BranchGlyph, { size: 14 }),
+                    h(
+                      'span',
+                      { className: 'gs-branch-row-main' },
+                      h('span', { className: 'gs-branch-name' }, branch.name),
+                      branch.head
+                        ? h('span', { className: 'gs-branch-meta' }, branch.head)
+                        : null,
+                    ),
+                    branch.name === current
+                      ? h('span', { className: 'gs-branch-check', title: t('branch.current') }, h(CheckGlyph))
+                      : null,
+                  ),
+                ),
+        ),
+        h('div', { className: 'gs-branch-divider' }),
+        h(
+          'form',
+          { className: 'gs-branch-create', onSubmit: submitCreate },
+          h(PlusGlyph, { size: 14 }),
+          h('input', {
+            type: 'text',
+            value: newBranch,
+            placeholder: t('branch.create'),
+            onChange: (event) => setNewBranch(event.target.value),
+            'aria-label': t('branch.create'),
+          }),
+          newBranch.trim() !== ''
+            ? h(
+                'button',
+                {
+                  type: 'submit',
+                  className: 'gs-branch-create-go',
+                  disabled: pending,
+                  title: t('branch.createLabel', { branch: newBranch.trim() }),
+                  'aria-label': t('branch.createLabel', { branch: newBranch.trim() }),
+                },
+                h(CheckGlyph),
+              )
+            : null,
+        ),
+        error ? h('div', { className: 'gs-error gs-branch-error' }, error) : null,
       );
     }
 
@@ -613,8 +937,8 @@ window.__ModuleLoader__.load({
 .gs-glyph { flex: none; }
 .gs-chip {
   box-sizing: border-box;
-  display: inline-flex; align-items: center; gap: 7px;
-  height: 26px; max-width: min(72vw, 520px); padding: 0 10px;
+  display: inline-flex; align-items: stretch;
+  height: 28px; max-width: min(72vw, 520px); padding: 0;
   border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.28));
   border-radius: 999px;
   background: color-mix(
@@ -624,10 +948,22 @@ window.__ModuleLoader__.load({
   );
   color: var(--dsw-alias-label-secondary, inherit);
   font: 12px/18px var(--dsw-font-family, inherit);
-  cursor: pointer; user-select: none;
+  user-select: none;
   transition: background-color .12s, border-color .12s;
 }
 .gs-chip:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.14)); }
+.gs-branch-trigger, .gs-status-trigger {
+  appearance: none; border: 0; background: transparent; color: inherit;
+  font: inherit; height: 100%; display: inline-flex; align-items: center;
+  gap: 5px; min-width: 0; cursor: pointer;
+}
+.gs-branch-trigger { padding: 0 5px 0 9px; }
+.gs-status-trigger { padding: 0 8px; border-left: 1px solid var(--dsw-alias-border-l3, rgba(128,128,128,.16)); }
+.gs-branch-trigger:disabled, .gs-status-trigger:disabled { cursor: default; opacity: .6; }
+.gs-branch-trigger:focus-visible, .gs-status-trigger:focus-visible {
+  outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary, #4d93f8));
+  outline-offset: -2px;
+}
 .gs-chip-error {
   color: var(--dsw-alias-state-error-primary, #e5534b);
   border-color: color-mix(in srgb, currentColor 35%, transparent);
@@ -647,6 +983,63 @@ window.__ModuleLoader__.load({
 .gs-chevron { display: inline-flex; align-items: center; flex: none; opacity: .55; }
 .gs-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
   clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.gs-branch-menu { width: 352px; padding: 10px; }
+.gs-branch-search {
+  display: flex; align-items: center; gap: 7px; height: 32px; padding: 0 9px;
+  border-radius: 8px; color: var(--dsw-alias-label-tertiary, inherit);
+  background: var(--dsw-alias-bg-module-platform, rgba(127,127,127,.08));
+}
+.gs-branch-search input, .gs-branch-create input {
+  min-width: 0; flex: 1; border: 0; outline: 0; padding: 0;
+  background: transparent; color: var(--dsw-alias-label-primary, inherit);
+  font: 12px/18px var(--dsw-font-family, inherit);
+}
+.gs-branch-search input::placeholder, .gs-branch-create input::placeholder {
+  color: var(--dsw-alias-label-tertiary, inherit);
+}
+.gs-branch-heading {
+  display: flex; align-items: center; gap: 6px; padding: 10px 7px 5px;
+  color: var(--dsw-alias-label-tertiary, inherit); font-size: 11px;
+}
+.gs-branch-local {
+  padding: 1px 6px; border-radius: 999px; font-size: 10px; line-height: 14px;
+  background: var(--dsw-alias-bg-module-platform, rgba(127,127,127,.10));
+}
+.gs-branch-list { max-height: 260px; overflow-y: auto; overscroll-behavior: contain; }
+.gs-branch-row {
+  box-sizing: border-box; width: 100%; min-height: 36px; padding: 5px 8px;
+  border: 0; border-radius: 7px; display: flex; align-items: center; gap: 8px;
+  background: transparent; color: var(--dsw-alias-label-secondary, inherit);
+  text-align: left; cursor: pointer;
+}
+.gs-branch-row:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.12)); }
+.gs-branch-row[aria-selected="true"] { color: var(--dsw-alias-label-primary, inherit); }
+.gs-branch-row:disabled { cursor: default; opacity: .65; }
+.gs-branch-row-main { min-width: 0; flex: 1; display: flex; flex-direction: column; }
+.gs-branch-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.gs-branch-meta {
+  color: var(--dsw-alias-label-tertiary, inherit);
+  font: 10px/14px var(--dsh-font-family-code, ui-monospace, monospace);
+}
+.gs-branch-check {
+  flex: none; display: inline-flex; color: var(--dsw-alias-state-business-primary, #4d93f8);
+}
+.gs-branch-state { padding: 12px 8px; color: var(--dsw-alias-label-tertiary, inherit); }
+.gs-branch-divider { height: 1px; margin: 8px 0; background: var(--dsw-alias-border-l3, rgba(128,128,128,.16)); }
+.gs-branch-create {
+  display: flex; align-items: center; gap: 7px; min-height: 32px; padding: 0 7px;
+  color: var(--dsw-alias-label-tertiary, inherit);
+}
+.gs-branch-create-go {
+  flex: none; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 6px;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--dsw-alias-state-business-primary, #4d93f8);
+  background: var(--dsw-alias-bg-module-platform, rgba(127,127,127,.10));
+  cursor: pointer;
+}
+.gs-branch-create-go:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.14)); }
+.gs-branch-create-go:disabled { opacity: .45; cursor: default; }
+.gs-branch-error { margin-top: 6px; }
 .gs-popover {
   position: absolute; left: 50%; bottom: calc(100% + 10px); transform: translateX(-50%);
   box-sizing: border-box; width: 390px; max-width: calc(100vw - 24px);

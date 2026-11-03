@@ -9,8 +9,10 @@ import {
   classifyStatus,
   createGitStatusService,
   inspectGitStatus,
+  listBranches,
   parseLastCommit,
   parseStatusV2,
+  switchBranch,
 } from '../lib/git.js';
 
 /** Run git and return trimmed stdout. */
@@ -100,6 +102,37 @@ test('parseLastCommit handles the unit-separated format', () => {
     },
   );
   assert.equal(parseLastCommit(''), null);
+});
+
+test('listBranches and switchBranch list, switch and create local branches', async () => {
+  const dir = createRepo();
+  try {
+    const original = git(dir, ['branch', '--show-current']);
+    git(dir, ['branch', 'dev']);
+
+    const listed = await listBranches(dir);
+    assert.equal(listed.kind, 'ok');
+    assert.equal(listed.value.current, original);
+    assert.ok(listed.value.branches.some((branch) => branch.name === original && branch.current));
+    assert.ok(listed.value.branches.some((branch) => branch.name === 'dev' && !branch.current));
+
+    const switched = await switchBranch(dir, 'dev');
+    assert.equal(switched.kind, 'ok');
+    assert.equal(switched.value.branch, 'dev');
+    assert.equal(switched.value.created, false);
+    assert.equal(switched.value.root.replaceAll('\\', '/').toLowerCase(), dir.replaceAll('\\', '/').toLowerCase());
+    assert.equal(git(dir, ['branch', '--show-current']), 'dev');
+
+    const created = await switchBranch(dir, 'feature/status-menu', { create: true });
+    assert.equal(created.kind, 'ok');
+    assert.equal(created.value.created, true);
+    assert.equal(git(dir, ['branch', '--show-current']), 'feature/status-menu');
+
+    const invalid = await switchBranch(dir, 'bad branch');
+    assert.equal(invalid.kind, 'invalid-branch');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('inspectGitStatus reports a dirty repository with staged, unstaged and untracked files', async () => {
