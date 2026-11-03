@@ -2,11 +2,11 @@
 
 给 DeepSeek Harness（DSH）增加一条克制、可直接操作的 **Git 状态提示**。
 
-仓库地址：[github.com/zmy15/dsh-plugin-git-status](https://github.com/zmy15/dsh-plugin-git-status)
-
 - 新会话：显示在工作区名称和 Agent 模式同一行的最右侧；
 - 对话开始后：显示在会话标题栏右侧工具区；
 - 点击分支名切换分支，点击状态区域查看改动、同步状态和最近提交。
+
+![Git 状态与分支菜单](assets/branch-picker.png)
 
 它显示当前会话工作目录的：
 
