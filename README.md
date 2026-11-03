@@ -1,10 +1,12 @@
 # dsh-plugin-git-status
 
-参考 Codex 的克制风格，给 DSH 输入框下方加一条 **Git 状态提示**：
+给 DeepSeek Harness（DSH）增加一条克制、可直接操作的 **Git 状态提示**。
 
-```
-[git] main ▾  ● 3  ↑1     ← 分支名点击切换，状态点击展开
-```
+仓库地址：[github.com/zmy15/dsh-plugin-git-status](https://github.com/zmy15/dsh-plugin-git-status)
+
+- 新会话：显示在工作区名称和 Agent 模式同一行的最右侧；
+- 对话开始后：显示在会话标题栏右侧工具区；
+- 点击分支名切换分支，点击状态区域查看改动、同步状态和最近提交。
 
 它显示当前会话工作目录的：
 
@@ -17,6 +19,20 @@
 - 展开后列出改动文件（最多 8 行，其余折叠为 “还有 N 个”）。
 
 工作区干净时只显示一个绿色对勾，不占视觉注意力。
+
+---
+
+## 功能
+
+- **当前分支**：普通分支、未出生分支和游离 HEAD 都有明确显示。
+- **最近提交**：显示短哈希、提交标题、作者和相对时间。
+- **未提交改动**：统计已暂存、未暂存、未跟踪和冲突文件，并列出具体路径。
+- **同步状态**：显示上游分支及 ahead / behind 数量。
+- **本地分支切换**：可搜索、切换、创建并检出本地分支。
+- **改动保护**：有未提交改动时先展示文件并要求确认，不会静默丢弃改动。
+- **冲突保护**：目标分支会覆盖本地文件时，Git 拒绝切换；原分支保持不变。
+- **自动刷新**：页面可见时每 10 秒刷新；窗口重新聚焦或标签页恢复可见时立即刷新。
+- **安全路径绑定**：浏览器只提交 session id，由宿主解析该会话的工作目录。
 
 ---
 
@@ -37,7 +53,7 @@
 
 ---
 
-## 实现
+## 接口与实现
 
 ```
 浏览器（client.js）                    宿主（index.js + lib/）
@@ -52,7 +68,7 @@
                                      └──────────────────────────────┘
 ```
 
-### 为什么宿主只收 sessionId
+### 宿主只接收 session id
 
 浏览器不能指定路径。宿主用 `ctx.sessions.get(sessionId).header.cwd` 自己解析工作目录，
 再把该目录交给 git。这样即使页面被篡改，也不能借这些路由读写任意目录。
@@ -60,17 +76,29 @@
 分支切换和创建只接受分支名，不接受路径。分支名先经过 `git check-ref-format --branch`
 校验；命令通过 `execFile` 执行，不经过 shell。
 
-### 为什么平常只跑两条 git 命令
+### 读取策略
 
 `git status --porcelain=v2 --branch -z` 一次给出分支、上游、ahead/behind 和全部改动
 （含重命名、冲突、未跟踪）；`git log -1` 只补最近提交。两条命令并行执行，各自有
 8 秒超时和 4 MiB 输出上限，避免大仓库卡住宿主。只有用户真正切换分支时，宿主才会
 额外读取一次工作区状态，用于决定是否需要确认。
 
-### 安装（web profile）
+---
+
+## 安装
+
+### Web profile
+
+先克隆仓库：
 
 ```bash
-dsh plugin --profile web add link:F:/dsh/dsh-plugin-git-status
+git clone https://github.com/zmy15/dsh-plugin-git-status.git
+```
+
+将当前 profile 链接到克隆目录：
+
+```bash
+dsh plugin --profile web add link:<本仓库绝对路径>
 ```
 
 然后把 `dsh-plugin-git-status` 加进该 profile `package.json` 的
@@ -84,7 +112,7 @@ dsh plugin --profile web add link:F:/dsh/dsh-plugin-git-status
 2. 手工建链接并把包名加入 profile：
 
 ```text
-<profile>/node_modules/dsh-plugin-git-status -> F:\dsh\dsh-plugin-git-status
+<profile>/node_modules/dsh-plugin-git-status -> <本仓库绝对路径>
 ```
 
 ```jsonc
@@ -95,11 +123,21 @@ dsh plugin --profile web add link:F:/dsh/dsh-plugin-git-status
 
 ---
 
-## 开发与验证
+## 环境要求
+
+- Node.js `>=22.19.0`
+- DSH `>=0.2.1-rc.1`
+- 系统 `PATH` 中可用的 Git
+
+---
+
+## 开发
 
 ```bash
-node --test test/*.test.mjs
+node --test test/git.test.mjs test/routes.test.mjs test/client.test.mjs
 node --check client.js
+node --check lib/git.js
+node --check lib/routes.js
 ```
 
 测试覆盖：
@@ -113,7 +151,9 @@ node --check client.js
 - 缓存与强制刷新；
 - 状态、分支列表和分支切换路由的 200 / 400 / 404 / 405 和方法校验。
 
-当前已在真实桌面 GUI 中验证状态 chip、状态面板和分支菜单渲染。
+状态条、状态面板、分支菜单，以及新会话和活动会话两种位置，均已在真实桌面 GUI 中验证。
+
+---
 
 ## 已知限制
 
