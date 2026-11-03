@@ -491,7 +491,11 @@ window.__ModuleLoader__.load({
         };
       }, [open, menuOpen]);
 
-      const className = placement === 'hero' ? 'gs-root gs-hero-dock' : 'gs-root';
+      const className = placement === 'hero-options'
+        ? 'gs-root gs-hero-option'
+        : placement === 'header-utility'
+          ? 'gs-root gs-header-utility'
+          : 'gs-root';
 
       if (status === null) return null;
       if (status === undefined) {
@@ -1128,13 +1132,31 @@ window.__ModuleLoader__.load({
   position: relative; z-index: 1000; display: flex; align-items: center;
   justify-content: center; max-width: 100%;
 }
-.gs-root.gs-hero-dock { display: none; }
-[data-content-phase="hero"] .gs-root.gs-hero-dock {
-  display: flex; order: 100; align-self: center; margin-top: -2px;
+.gs-root.gs-hero-option {
+  display: flex; justify-content: flex-end; align-self: center;
+  margin-left: 0;
 }
-[data-content-phase="hero"] .gs-hero-dock .gs-popover {
-  top: calc(100% + 10px); bottom: auto;
+.gs-root.gs-header-utility {
+  display: flex; align-items: center;
+}
+[data-content-phase="hero"] .gs-hero-option .gs-popover {
+  top: calc(100% + 8px); right: 0; bottom: auto; left: auto;
+  transform: none;
   max-height: 38vh; overflow-y: auto; overscroll-behavior: contain;
+  animation-name: gs-pop-in-right;
+}
+.gs-header-utility .gs-popover {
+  top: calc(100% + 8px); right: 0; bottom: auto; left: auto;
+  transform: none;
+  max-height: min(70vh, 620px); overflow-y: auto; overscroll-behavior: contain;
+  animation-name: gs-pop-in-right;
+}
+.gs-hero-option .gs-branch-menu {
+  width: min(352px, calc(100vw - 24px));
+}
+@keyframes gs-pop-in-right {
+  from { opacity: 0; transform: translateY(6px) scale(.985); }
+  to { opacity: 1; transform: none; }
 }
 .gs-glyph { flex: none; }
 .gs-chip {
@@ -1422,15 +1444,18 @@ window.__ModuleLoader__.load({
           }
         }, 'git-status: dictionaries');
 
-        ctx.slots.inject('conversation.composer.dock', () => {
+        // Once the conversation starts, the hero row disappears. Keep the
+        // same top-right placement by mounting beside the session header's
+        // right-side utilities instead of adding a row under the composer.
+        ctx.slots.inject('conversation.session.header.utilities', () => {
           try {
             return ctx.slots.register(
               {
-                name: 'conversation.composer.dock',
-                id: 'git-status',
+                name: 'conversation.session.header.utilities',
+                id: 'git-status-header-utility',
                 order: 60,
                 locale: NS,
-                inject: (sessionId) => ({ sessionId }),
+                inject: (sessionId) => ({ sessionId, placement: 'header-utility' }),
               },
               GitStatusDock,
             );
@@ -1439,18 +1464,18 @@ window.__ModuleLoader__.load({
           }
         });
 
-        // Hero/new-session layouts do not render conversation.composer.dock.
-        // conversation.input.dock exists in both phases, so this second
-        // registration keeps the chip visible before the first message.
-        ctx.slots.inject('conversation.input.dock', () => {
+        // The hero workspace row already renders workspace, agent preset and
+        // its right-aligned option slot. Put Git status beside those controls
+        // instead of giving it another row below the composer.
+        ctx.slots.inject('conversation.hero.options', () => {
           try {
             return ctx.slots.register(
               {
-                name: 'conversation.input.dock',
-                id: 'git-status-hero',
+                name: 'conversation.hero.options',
+                id: 'git-status-hero-option',
                 order: 60,
                 locale: NS,
-                inject: (sessionId) => ({ sessionId, placement: 'hero' }),
+                inject: (sessionId) => ({ sessionId, placement: 'hero-options' }),
               },
               GitStatusDock,
             );

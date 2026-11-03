@@ -7,7 +7,7 @@ import vm from 'node:vm';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 
-test('composer dock injects the current session id into the component props', () => {
+test('conversation slots inject the current session id into the component props', () => {
   let definition;
   const window = {
     __ModuleLoader__: {
@@ -61,14 +61,17 @@ test('composer dock injects the current session id into the component props', ()
   };
 
   plugin.apply(ctx);
-  const composer = registrations.find(({ options }) => options.name === 'conversation.composer.dock');
-  const hero = registrations.find(({ options }) => options.name === 'conversation.input.dock');
+  const header = registrations.find(({ options }) => options.name === 'conversation.session.header.utilities');
+  const hero = registrations.find(({ options }) => options.name === 'conversation.hero.options');
 
-  assert.ok(composer, 'the active composer slot must be registered');
-  assert.ok(hero, 'the hero input slot must be registered');
-  assert.equal(composer.options.inject('session-1').sessionId, 'session-1');
+  assert.ok(header, 'the active session header utilities slot must be registered');
+  assert.ok(hero, 'the hero options slot must be registered');
+  assert.deepEqual(
+    { ...header.options.inject('session-1') },
+    { sessionId: 'session-1', placement: 'header-utility' },
+  );
   assert.deepEqual(
     { ...hero.options.inject('session-1') },
-    { sessionId: 'session-1', placement: 'hero' },
+    { sessionId: 'session-1', placement: 'hero-options' },
   );
 });

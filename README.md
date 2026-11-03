@@ -22,9 +22,9 @@
 
 ## 界面与交互
 
-- **位置**：活动对话使用 `conversation.composer.dock`；新会话 hero 模式使用同样存在的
-  `conversation.input.dock`，再通过 CSS 排序放到输入框下方。两种布局都保持 ambient chip，
-  不会挤压输入框，也不会盖住工具栏。
+- **位置**：新会话 hero 模式使用 `conversation.hero.options`，显示在工作区名称与
+  Agent 模式同一行的最右侧；对话开始后使用 `conversation.session.header.utilities`，
+  显示在会话标题栏右侧工具区，不再占用输入框下方的新一行。
 - **会话绑定**：该槽位本身不向组件传 props，插件通过 slot 的 `inject(sessionId)` 取得当前会话 ID。
 - **切换分支**：点击分支名打开本地分支菜单；当前分支带勾选，可按名称过滤，
   也可在底部输入新分支名后回车创建并检出。有未提交改动时先展示改动数量和文件，

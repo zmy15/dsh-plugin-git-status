@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-git-status",
-  "version": "1.2.0",
+  "version": "1.2.2",
   "description": "Codex-style Git status chip below the DSH composer with local branch switching, latest commits, uncommitted changes and dirty-worktree protection.",
   "type": "module",
   "main": "index.js",
