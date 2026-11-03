@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Git Status",
+    "description": "Shows the current Git branch, changed-file count, ahead/behind state and recent commit below the composer."
+  }
+}

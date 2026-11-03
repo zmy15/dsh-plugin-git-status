@@ -1,0 +1,791 @@
+/**
+ * dsh-plugin-git-status — browser half.
+ *
+ * A compact Codex-style Git status chip below the composer card. It reads the
+ * same-origin `/git-status/status` route; all Git work happens in the host.
+ *
+ * The module follows the Harness Module Loader shape: a lazy factory that
+ * receives React through the host's module table. No Harness client package
+ * is imported at runtime, so the bundle stays valid across SDK updates.
+ */
+
+window.__ModuleLoader__.load({
+  id: 'dsh-plugin-git-status',
+  factory(require) {
+    const React = require('react');
+    const h = React.createElement;
+
+    /** Locale namespace; also the slot registration's `locale` seat. */
+    const NS = 'git-status';
+    /** Poll interval while the composer is visible. */
+    const POLL_MS = 10_000;
+    /** Files shown before the "+N more" row. */
+    const FILES_SHOWN = 8;
+
+    const EN = {
+      'chip.title': 'Git · {branch}',
+      'chip.clean': 'Clean',
+      'chip.change': '1 change',
+      'chip.changes': '{count} changes',
+      'chip.ahead': '{count} ahead',
+      'chip.behind': '{count} behind',
+      'chip.detached': 'Detached',
+      'chip.unborn': 'Unborn branch',
+      'chip.unknown': 'Unknown branch',
+      'chip.error': 'Git unavailable',
+      'popover.title': 'Git status',
+      'popover.close': 'Close',
+      'popover.repo': 'Repository',
+      'popover.detached': 'Detached HEAD',
+      'popover.noUpstream': 'No upstream',
+      'popover.upToDate': 'Up to date',
+      'popover.ahead': '{count} ahead',
+      'popover.behind': '{count} behind',
+      'popover.changed': '{count} changed',
+      'popover.staged': '{count} staged',
+      'popover.unstaged': '{count} unstaged',
+      'popover.untracked': '{count} untracked',
+      'popover.conflicted': '{count} conflicts',
+      'popover.clean': 'Working tree clean — no changes to commit',
+      'popover.files': 'Changed files',
+      'popover.lastCommit': 'Last commit',
+      'popover.noCommits': 'No commits yet',
+      'popover.refresh': 'Refresh',
+      'popover.refreshing': 'Refreshing…',
+      'popover.more': '+{count} more',
+      'file.modified': 'Modified',
+      'file.added': 'Added',
+      'file.deleted': 'Deleted',
+      'file.renamed': 'Renamed',
+      'file.copied': 'Copied',
+      'file.untracked': 'Untracked',
+      'file.conflicted': 'Conflict',
+      'file.typechange': 'Type changed',
+    };
+
+    const ZH = {
+      'chip.title': 'Git · {branch}',
+      'chip.clean': '干净',
+      'chip.change': '1 处改动',
+      'chip.changes': '{count} 处改动',
+      'chip.ahead': '领先 {count}',
+      'chip.behind': '落后 {count}',
+      'chip.detached': '游离 HEAD',
+      'chip.unborn': '未出生分支',
+      'chip.unknown': '未知分支',
+      'chip.error': 'Git 不可用',
+      'popover.title': 'Git 状态',
+      'popover.close': '关闭',
+      'popover.repo': '仓库',
+      'popover.detached': '游离 HEAD',
+      'popover.noUpstream': '未设置上游分支',
+      'popover.upToDate': '已与上游同步',
+      'popover.ahead': '领先 {count} 个提交',
+      'popover.behind': '落后 {count} 个提交',
+      'popover.changed': '{count} 个改动',
+      'popover.staged': '{count} 个已暂存',
+      'popover.unstaged': '{count} 个未暂存',
+      'popover.untracked': '{count} 个未跟踪',
+      'popover.conflicted': '{count} 个冲突',
+      'popover.clean': '工作区干净，没有待提交的改动',
+      'popover.files': '改动的文件',
+      'popover.lastCommit': '最近提交',
+      'popover.noCommits': '还没有提交',
+      'popover.refresh': '刷新',
+      'popover.refreshing': '刷新中…',
+      'popover.more': '还有 {count} 个',
+      'file.modified': '已修改',
+      'file.added': '新增',
+      'file.deleted': '已删除',
+      'file.renamed': '重命名',
+      'file.copied': '复制',
+      'file.untracked': '未跟踪',
+      'file.conflicted': '冲突',
+      'file.typechange': '类型变更',
+    };
+
+    /** Fallback used only if the locale seat is unavailable. */
+    function fallbackT(key, values) {
+      let text = EN[key] ?? key;
+      if (values !== undefined) {
+        for (const [name, value] of Object.entries(values)) {
+          text = text.split(`{${name}}`).join(String(value));
+        }
+      }
+      return text;
+    }
+
+    /**
+     * Read the host status route.
+     * @param {string} sessionId - live session id.
+     * @param {boolean} force - bypass the host cache.
+     * @returns {Promise<object|null>} status, or null when not a repository.
+     */
+    async function fetchStatus(sessionId, force) {
+      const query = `sessionId=${encodeURIComponent(sessionId)}${force ? '&refresh=1' : ''}`;
+      const response = await fetch(`/git-status/status?${query}`, {
+        headers: { accept: 'application/json' },
+        cache: 'no-store',
+      });
+      if (!response.ok) throw new Error(`Git status request failed (${response.status})`);
+      const payload = await response.json();
+      if (payload === null || typeof payload !== 'object') throw new Error('Malformed Git status response');
+      if (!payload.ok) {
+        throw new Error(payload.error?.message ?? 'Git status unavailable');
+      }
+      return payload.value ?? null;
+    }
+
+    /** Small branch glyph. */
+    function BranchGlyph({ size = 14 }) {
+      return h(
+        'svg',
+        {
+          width: size,
+          height: size,
+          viewBox: '0 0 16 16',
+          fill: 'none',
+          'aria-hidden': 'true',
+          className: 'gs-glyph',
+        },
+        h('path', {
+          d: 'M4.25 3.4v9.2',
+          stroke: 'currentColor',
+          strokeWidth: 1.5,
+          strokeLinecap: 'round',
+        }),
+        h('path', {
+          d: 'M11.75 3.4v3.05a2.35 2.35 0 0 1-2.35 2.35H4.25',
+          stroke: 'currentColor',
+          strokeWidth: 1.5,
+          strokeLinecap: 'round',
+        }),
+        h('circle', { cx: 4.25, cy: 2.25, r: 1.4, stroke: 'currentColor', strokeWidth: 1.5 }),
+        h('circle', { cx: 11.75, cy: 2.25, r: 1.4, stroke: 'currentColor', strokeWidth: 1.5 }),
+        h('circle', { cx: 4.25, cy: 13.75, r: 1.4, stroke: 'currentColor', strokeWidth: 1.5 }),
+      );
+    }
+
+    /** Small check glyph for a clean tree. */
+    function CheckGlyph({ size = 12 }) {
+      return h(
+        'svg',
+        { width: size, height: size, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true' },
+        h('path', {
+          d: 'M3.2 8.4l3.1 3.1 6.5-7',
+          stroke: 'currentColor',
+          strokeWidth: 1.8,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+        }),
+      );
+    }
+
+    /** Small chevron that flips when the popover is open. */
+    function ChevronGlyph({ open }) {
+      return h(
+        'svg',
+        { width: 12, height: 12, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true' },
+        h('path', {
+          d: open ? 'M4 10l4-4 4 4' : 'M4 6l4 4 4-4',
+          stroke: 'currentColor',
+          strokeWidth: 1.5,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+        }),
+      );
+    }
+
+    /**
+     * Format an ISO instant relative to now. Falls back to a local date when
+     * Intl.RelativeTimeFormat is unavailable.
+     * @param {string|null} iso - commit date.
+     * @returns {string}
+     */
+    function relativeTime(iso) {
+      if (typeof iso !== 'string' || iso === '') return '';
+      const date = new Date(iso);
+      if (Number.isNaN(date.getTime())) return '';
+      const diff = date.getTime() - Date.now();
+      const units = [
+        ['year', 31_536_000_000],
+        ['month', 2_592_000_000],
+        ['week', 604_800_000],
+        ['day', 86_400_000],
+        ['hour', 3_600_000],
+        ['minute', 60_000],
+        ['second', 1_000],
+      ];
+      try {
+        const formatter = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
+        for (const [unit, ms] of units) {
+          if (Math.abs(diff) >= ms || unit === 'second') {
+            return formatter.format(Math.round(diff / ms), unit);
+          }
+        }
+      } catch {
+        // Older engines: a stable absolute value is better than nothing.
+      }
+      try {
+        return date.toLocaleString();
+      } catch {
+        return iso;
+      }
+    }
+
+    /**
+     * The chip and its popover.
+     * @param {{ sessionId?: string, t?: Function }} props - slot runtime + locale.
+     */
+    function GitStatusDock(props) {
+      const sessionId = props.sessionId;
+      const placement = props.placement;
+      const t = typeof props.t === 'function' ? props.t : fallbackT;
+      const [status, setStatus] = React.useState(undefined);
+      const [error, setError] = React.useState('');
+      const [open, setOpen] = React.useState(false);
+      const [refreshing, setRefreshing] = React.useState(false);
+      const rootRef = React.useRef(null);
+      const buttonRef = React.useRef(null);
+      const aliveRef = React.useRef(true);
+
+      const refresh = React.useCallback(
+        async (force) => {
+          if (typeof sessionId !== 'string' || sessionId === '') return;
+          try {
+            const next = await fetchStatus(sessionId, force === true);
+            if (!aliveRef.current) return;
+            setStatus(next);
+            setError('');
+          } catch (cause) {
+            if (!aliveRef.current) return;
+            const message = cause instanceof Error ? cause.message : String(cause);
+            console.warn('git-status: status request failed:', message);
+            setError(message);
+          }
+        },
+        [sessionId],
+      );
+
+      // Initial read, focus/visibility refresh, and a slow visible-page poll.
+      React.useEffect(() => {
+        aliveRef.current = true;
+        if (typeof sessionId !== 'string' || sessionId === '') {
+          return () => {
+            aliveRef.current = false;
+          };
+        }
+
+        let disposed = false;
+        let timer;
+
+        function schedule() {
+          if (!disposed) timer = window.setTimeout(tick, POLL_MS);
+        }
+
+        function tick() {
+          if (disposed) return;
+          if (document.visibilityState === 'hidden') {
+            schedule();
+            return;
+          }
+          refresh(false).finally(schedule);
+        }
+
+        refresh(false);
+        schedule();
+
+        const onFocus = () => {
+          if (document.visibilityState !== 'hidden') refresh(false);
+        };
+        const onVisibility = () => {
+          if (document.visibilityState === 'visible') refresh(false);
+        };
+        window.addEventListener('focus', onFocus);
+        document.addEventListener('visibilitychange', onVisibility);
+
+        return () => {
+          disposed = true;
+          aliveRef.current = false;
+          window.clearTimeout(timer);
+          window.removeEventListener('focus', onFocus);
+          document.removeEventListener('visibilitychange', onVisibility);
+        };
+      }, [sessionId, refresh]);
+
+      // Dismiss on outside pointer or Escape.
+      React.useEffect(() => {
+        if (!open) return undefined;
+        const onPointer = (event) => {
+          const root = rootRef.current;
+          if (root !== null && event.target instanceof Node && !root.contains(event.target)) {
+            setOpen(false);
+          }
+        };
+        const onKey = (event) => {
+          if (event.key === 'Escape') {
+            setOpen(false);
+            buttonRef.current?.focus?.();
+          }
+        };
+        document.addEventListener('pointerdown', onPointer, true);
+        document.addEventListener('keydown', onKey);
+        return () => {
+          document.removeEventListener('pointerdown', onPointer, true);
+          document.removeEventListener('keydown', onKey);
+        };
+      }, [open]);
+
+      const className = placement === 'hero' ? 'gs-root gs-hero-dock' : 'gs-root';
+
+      if (status === null) return null;
+      if (status === undefined) {
+        if (error === '') return null;
+        return h(
+          'div',
+          { className },
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'gs-chip gs-chip-error',
+              onClick: () => refresh(true),
+              'aria-label': `${t('chip.error')}: ${error}`,
+              title: error,
+            },
+            h(BranchGlyph, { size: 14 }),
+            h('span', { className: 'gs-branch' }, t('chip.error')),
+          ),
+        );
+      }
+
+      const counts = status.counts ?? { changed: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 };
+      const changed = Number(counts.changed) || 0;
+      const ahead = Number(status.ahead) || 0;
+      const behind = Number(status.behind) || 0;
+      const branchLabel = status.detached
+        ? status.head
+          ? `${t('chip.detached')} @ ${status.head}`
+          : t('chip.detached')
+        : status.branch || (status.unborn ? t('chip.unborn') : t('chip.unknown'));
+
+      const titleParts = [t('chip.title', { branch: branchLabel })];
+      if (changed > 0) titleParts.push(changed === 1 ? t('chip.change') : t('chip.changes', { count: changed }));
+      else titleParts.push(t('chip.clean'));
+      if (ahead > 0) titleParts.push(t('chip.ahead', { count: ahead }));
+      if (behind > 0) titleParts.push(t('chip.behind', { count: behind }));
+      const title = titleParts.join(' · ');
+
+      const toggle = () => {
+        if (open) {
+          setOpen(false);
+          return;
+        }
+        setOpen(true);
+        setRefreshing(true);
+        refresh(true).finally(() => {
+          if (aliveRef.current) setRefreshing(false);
+        });
+      };
+
+      const onRefresh = () => {
+        setRefreshing(true);
+        refresh(true).finally(() => {
+          if (aliveRef.current) setRefreshing(false);
+        });
+      };
+
+      return h(
+        'div',
+        { className, ref: rootRef },
+        h(
+          'button',
+          {
+            type: 'button',
+            ref: buttonRef,
+            className: 'gs-chip',
+            onClick: toggle,
+            'aria-haspopup': 'dialog',
+            'aria-expanded': open,
+            'aria-label': title,
+            title,
+          },
+          h(BranchGlyph, { size: 14 }),
+          h('span', { className: 'gs-branch' }, branchLabel),
+          changed > 0
+            ? h(
+                'span',
+                { className: 'gs-dirty', 'aria-hidden': 'true' },
+                h('span', { className: 'gs-dot' }),
+                h('span', null, String(changed)),
+              )
+            : h(
+                'span',
+                { className: 'gs-clean', title: t('chip.clean') },
+                h(CheckGlyph, { size: 12 }),
+                h('span', { className: 'gs-sr-only' }, t('chip.clean')),
+              ),
+          ahead > 0 ? h('span', { className: 'gs-sync', 'aria-hidden': 'true' }, `↑${ahead}`) : null,
+          behind > 0 ? h('span', { className: 'gs-sync', 'aria-hidden': 'true' }, `↓${behind}`) : null,
+          h('span', { className: 'gs-chevron' }, h(ChevronGlyph, { open })),
+        ),
+        open
+          ? h(GitStatusPopover, {
+              status,
+              counts,
+              t,
+              error,
+              refreshing,
+              onRefresh,
+              onClose: () => {
+                setOpen(false);
+                buttonRef.current?.focus?.();
+              },
+            })
+          : null,
+      );
+    }
+
+    /** The status panel. */
+    function GitStatusPopover({ status, counts, t, error, refreshing, onRefresh, onClose }) {
+      const files = Array.isArray(status.files) ? status.files : [];
+      const visible = files.slice(0, FILES_SHOWN);
+      const changed = Number(counts.changed) || files.length;
+      const remaining = Math.max(0, changed - visible.length);
+      const branchLabel = status.detached
+        ? status.head
+          ? `${t('chip.detached')} @ ${status.head}`
+          : t('chip.detached')
+        : status.branch || (status.unborn ? t('chip.unborn') : t('chip.unknown'));
+
+      const sync = [];
+      if (status.detached) {
+        sync.push(t('popover.detached'));
+      } else if (!status.upstream) {
+        sync.push(t('popover.noUpstream'));
+      } else {
+        sync.push(status.upstream);
+        if (status.ahead > 0) sync.push(t('popover.ahead', { count: status.ahead }));
+        if (status.behind > 0) sync.push(t('popover.behind', { count: status.behind }));
+        if (status.ahead === 0 && status.behind === 0) sync.push(t('popover.upToDate'));
+      }
+
+      const countChips = [];
+      if (changed > 0) countChips.push(t('popover.changed', { count: changed }));
+      if (counts.staged > 0) countChips.push(t('popover.staged', { count: counts.staged }));
+      if (counts.unstaged > 0) countChips.push(t('popover.unstaged', { count: counts.unstaged }));
+      if (counts.untracked > 0) countChips.push(t('popover.untracked', { count: counts.untracked }));
+      if (counts.conflicted > 0) countChips.push(t('popover.conflicted', { count: counts.conflicted }));
+
+      const commit = status.lastCommit;
+
+      return h(
+        'div',
+        {
+          className: 'gs-popover',
+          role: 'dialog',
+          'aria-label': t('popover.title'),
+          'aria-modal': 'false',
+        },
+        h(
+          'div',
+          { className: 'gs-pop-head' },
+          h('span', { className: 'gs-pop-glyph' }, h(BranchGlyph, { size: 16 })),
+          h(
+            'div',
+            { className: 'gs-pop-title' },
+            h('div', { className: 'gs-pop-repo' }, status.name || t('popover.repo')),
+            h('div', { className: 'gs-pop-branch' }, branchLabel),
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'gs-icon-btn',
+              onClick: onClose,
+              'aria-label': t('popover.close'),
+              title: t('popover.close'),
+            },
+            '×',
+          ),
+        ),
+        h('div', { className: 'gs-pop-sync' }, sync.join(' · ')),
+        countChips.length > 0
+          ? h('div', { className: 'gs-counts' }, ...countChips.map((text, index) =>
+              h('span', { className: 'gs-count', key: index }, text)))
+          : null,
+        error ? h('div', { className: 'gs-error' }, error) : null,
+        h('div', { className: 'gs-divider' }),
+        changed === 0
+          ? h('div', { className: 'gs-empty' }, t('popover.clean'))
+          : h(
+              'div',
+              { className: 'gs-files-wrap' },
+              h('div', { className: 'gs-section-label' }, t('popover.files')),
+              h(
+                'ul',
+                { className: 'gs-files' },
+                ...visible.map((file, index) =>
+                  h(
+                    'li',
+                    { className: 'gs-file', key: `${file.path}:${index}` },
+                    h(
+                      'span',
+                      {
+                        className: `gs-file-badge gs-${file.kind}`,
+                        title: t(`file.${file.kind}`),
+                        'aria-label': t(`file.${file.kind}`),
+                      },
+                      file.letter,
+                    ),
+                    h(
+                      'span',
+                      { className: 'gs-file-path', title: file.path },
+                      file.path,
+                      file.from !== undefined ? h('span', { className: 'gs-file-from' }, ` ← ${file.from}`) : null,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        remaining > 0 ? h('div', { className: 'gs-more' }, t('popover.more', { count: remaining })) : null,
+        h('div', { className: 'gs-divider' }),
+        h(
+          'div',
+          { className: 'gs-commit' },
+          h('div', { className: 'gs-section-label' }, t('popover.lastCommit')),
+          commit
+            ? h(
+                React.Fragment,
+                null,
+                h(
+                  'div',
+                  { className: 'gs-commit-row' },
+                  h('code', { className: 'gs-commit-hash' }, commit.short),
+                  h('span', { className: 'gs-commit-subject', title: commit.subject }, commit.subject),
+                ),
+                h(
+                  'div',
+                  { className: 'gs-commit-meta' },
+                  [commit.author, relativeTime(commit.date)].filter(Boolean).join(' · '),
+                ),
+              )
+            : h('div', { className: 'gs-commit-meta' }, t('popover.noCommits')),
+        ),
+        h(
+          'div',
+          { className: 'gs-pop-foot' },
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'gs-refresh',
+              onClick: onRefresh,
+              disabled: refreshing,
+            },
+            refreshing ? t('popover.refreshing') : t('popover.refresh'),
+          ),
+        ),
+      );
+    }
+
+    /** Inject the component's stylesheet once; remove only what we created. */
+    function ensureStyles() {
+      if (typeof document === 'undefined') return () => {};
+      let style = document.getElementById('git-status-styles');
+      const created = style === null;
+      if (style === null) {
+        style = document.createElement('style');
+        style.id = 'git-status-styles';
+        style.textContent = `
+.gs-root {
+  position: relative; z-index: 1000; display: flex; align-items: center;
+  justify-content: center; max-width: 100%;
+}
+.gs-root.gs-hero-dock { display: none; }
+[data-content-phase="hero"] .gs-root.gs-hero-dock {
+  display: flex; order: 100; align-self: center; margin-top: -2px;
+}
+[data-content-phase="hero"] .gs-hero-dock .gs-popover {
+  top: calc(100% + 10px); bottom: auto;
+  max-height: 38vh; overflow-y: auto; overscroll-behavior: contain;
+}
+.gs-glyph { flex: none; }
+.gs-chip {
+  box-sizing: border-box;
+  display: inline-flex; align-items: center; gap: 7px;
+  height: 26px; max-width: min(72vw, 520px); padding: 0 10px;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.28));
+  border-radius: 999px;
+  background: color-mix(
+    in srgb,
+    var(--dsw-alias-bg-base, #fff) 84%,
+    var(--dsw-specific-menu, #fff)
+  );
+  color: var(--dsw-alias-label-secondary, inherit);
+  font: 12px/18px var(--dsw-font-family, inherit);
+  cursor: pointer; user-select: none;
+  transition: background-color .12s, border-color .12s;
+}
+.gs-chip:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.14)); }
+.gs-chip-error {
+  color: var(--dsw-alias-state-error-primary, #e5534b);
+  border-color: color-mix(in srgb, currentColor 35%, transparent);
+}
+.gs-chip:focus-visible {
+  outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary, #4d93f8));
+  outline-offset: 2px;
+}
+.gs-branch { min-width: 0; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--dsw-alias-label-primary, inherit); font-weight: 500; }
+.gs-dirty { display: inline-flex; align-items: center; gap: 4px; flex: none;
+  color: var(--dsw-alias-state-warn-primary, #f59e0b); font-variant-numeric: tabular-nums; }
+.gs-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.gs-clean { display: inline-flex; align-items: center; flex: none;
+  color: var(--dsw-alias-state-success-primary, #4ed17e); }
+.gs-sync { flex: none; color: var(--dsw-alias-label-tertiary, inherit); font-variant-numeric: tabular-nums; }
+.gs-chevron { display: inline-flex; align-items: center; flex: none; opacity: .55; }
+.gs-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
+  clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.gs-popover {
+  position: absolute; left: 50%; bottom: calc(100% + 10px); transform: translateX(-50%);
+  box-sizing: border-box; width: 390px; max-width: calc(100vw - 24px);
+  padding: 14px;
+  border: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.24));
+  border-radius: var(--dsw-radius-lg, 16px);
+  background: color-mix(
+    in srgb,
+    var(--dsw-alias-bg-base, #fff) 92%,
+    var(--dsw-specific-menu, #fff)
+  );
+  backdrop-filter: var(--dsw-menu-backdrop-filter, none);
+  box-shadow: var(--dsw-elevation-panel, 0 18px 46px rgba(0,0,0,.22));
+  color: var(--dsw-alias-label-primary, inherit);
+  font: 12px/18px var(--dsw-font-family, inherit);
+  text-align: left; z-index: 40;
+  animation: gs-pop-in .14s ease-out both;
+}
+@keyframes gs-pop-in {
+  from { opacity: 0; transform: translate(-50%, 6px) scale(.985); }
+  to { opacity: 1; transform: translate(-50%, 0) scale(1); }
+}
+@media (prefers-reduced-motion: reduce) { .gs-popover { animation: none; } }
+.gs-pop-head { display: flex; align-items: flex-start; gap: 9px; }
+.gs-pop-glyph { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px;
+  border-radius: 7px; flex: none; color: var(--dsw-alias-label-secondary, inherit);
+  background: var(--dsw-alias-bg-module-platform, rgba(127,127,127,.10)); }
+.gs-pop-title { min-width: 0; flex: 1; }
+.gs-pop-repo { color: var(--dsw-alias-label-caption, inherit); font-size: 10px; line-height: 14px;
+  text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
+.gs-pop-branch { color: var(--dsw-alias-label-primary, inherit); font-size: 14px; line-height: 20px;
+  font-weight: 600; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
+.gs-icon-btn { flex: none; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 6px;
+  background: transparent; color: var(--dsw-alias-label-tertiary, inherit); cursor: pointer;
+  font-size: 17px; line-height: 22px; }
+.gs-icon-btn:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.14)); }
+.gs-icon-btn:focus-visible { outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary, #4d93f8)); outline-offset: 1px; }
+.gs-pop-sync { margin-top: 2px; color: var(--dsw-alias-label-tertiary, inherit); font-size: 11px; line-height: 16px;
+  text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
+.gs-counts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.gs-count { padding: 2px 8px; border-radius: 999px; font-size: 11px; line-height: 16px;
+  color: var(--dsw-alias-label-secondary, inherit);
+  background: var(--dsw-alias-bg-module-platform, rgba(127,127,127,.10)); }
+.gs-divider { height: 1px; margin: 10px 0; background: var(--dsw-alias-border-l3, rgba(128,128,128,.16)); }
+.gs-error { margin-top: 8px; padding: 6px 8px; border-radius: 6px; font-size: 11px;
+  color: var(--dsw-alias-state-error-primary, #e5534b);
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #e5534b) 10%, transparent); }
+.gs-section-label { margin-bottom: 5px; color: var(--dsw-alias-label-caption, inherit);
+  font-size: 10px; line-height: 14px; }
+.gs-files-wrap { min-width: 0; }
+.gs-files { list-style: none; margin: 0; padding: 0; max-height: 210px; overflow-y: auto;
+  overscroll-behavior: contain; }
+.gs-file { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 3px 0; }
+.gs-file-badge { flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; border-radius: 5px; font: 600 10px/1 var(--dsh-font-family-code, ui-monospace, monospace);
+  color: var(--dsw-alias-label-secondary, inherit);
+  background: var(--dsw-alias-bg-module-platform, rgba(127,127,127,.12));
+  background: color-mix(in srgb, currentColor 14%, transparent); }
+.gs-file-badge.gs-modified, .gs-file-badge.gs-typechange { color: var(--dsw-alias-state-warn-primary, #f59e0b); }
+.gs-file-badge.gs-added, .gs-file-badge.gs-untracked { color: var(--dsw-alias-state-success-primary, #4ed17e); }
+.gs-file-badge.gs-deleted, .gs-file-badge.gs-conflicted { color: var(--dsw-alias-state-error-primary, #e5534b); }
+.gs-file-badge.gs-renamed, .gs-file-badge.gs-copied { color: var(--dsw-alias-state-business-primary, #4d93f8); }
+.gs-file-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--dsw-alias-label-secondary, inherit);
+  font: 11px/18px var(--dsh-font-family-code, ui-monospace, monospace); }
+.gs-file-from { color: var(--dsw-alias-label-caption, inherit); }
+.gs-more { padding-top: 6px; color: var(--dsw-alias-label-tertiary, inherit); font-size: 11px; }
+.gs-empty { padding: 2px 0; color: var(--dsw-alias-label-tertiary, inherit); }
+.gs-commit-row { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+.gs-commit-hash { flex: none; padding: 1px 5px; border-radius: 4px;
+  color: var(--dsw-alias-label-secondary, inherit);
+  background: var(--dsw-alias-bg-module-platform, rgba(127,127,127,.10));
+  font: 10px/16px var(--dsh-font-family-code, ui-monospace, monospace); }
+.gs-commit-subject { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--dsw-alias-label-secondary, inherit); font-size: 12px; }
+.gs-commit-meta { margin-top: 3px; color: var(--dsw-alias-label-tertiary, inherit); font-size: 11px; line-height: 16px; }
+.gs-pop-foot { display: flex; justify-content: flex-end; margin-top: 10px; }
+.gs-refresh { padding: 4px 10px; border-radius: 6px; font-size: 11px; line-height: 16px;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.28));
+  background: transparent; color: var(--dsw-alias-label-secondary, inherit); cursor: pointer; }
+.gs-refresh:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.14)); }
+.gs-refresh:disabled { opacity: .5; cursor: default; }
+`;
+        document.head.appendChild(style);
+      }
+      return () => {
+        if (created) style.remove();
+      };
+    }
+
+    return {
+      inject: ['slots', 'locale'],
+      apply(ctx) {
+        ctx.effect(() => ensureStyles(), 'git-status: component styles');
+        ctx.effect(() => {
+          try {
+            return ctx.locale.register(NS, { en: EN, zh: ZH });
+          } catch {
+            return () => {};
+          }
+        }, 'git-status: dictionaries');
+
+        ctx.slots.inject('conversation.composer.dock', () => {
+          try {
+            return ctx.slots.register(
+              {
+                name: 'conversation.composer.dock',
+                id: 'git-status',
+                order: 60,
+                locale: NS,
+                inject: (sessionId) => ({ sessionId }),
+              },
+              GitStatusDock,
+            );
+          } catch {
+            return () => {};
+          }
+        });
+
+        // Hero/new-session layouts do not render conversation.composer.dock.
+        // conversation.input.dock exists in both phases, so this second
+        // registration keeps the chip visible before the first message.
+        ctx.slots.inject('conversation.input.dock', () => {
+          try {
+            return ctx.slots.register(
+              {
+                name: 'conversation.input.dock',
+                id: 'git-status-hero',
+                order: 60,
+                locale: NS,
+                inject: (sessionId) => ({ sessionId, placement: 'hero' }),
+              },
+              GitStatusDock,
+            );
+          } catch {
+            return () => {};
+          }
+        });
+      },
+    };
+  },
+});
