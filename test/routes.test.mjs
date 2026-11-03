@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
@@ -186,6 +186,81 @@ test('branch routes list, switch and create branches for the session cwd', async
     );
     assert.equal(wrongMethod.statusCode, 405);
     assert.equal(wrongMethod.headers.allow, 'POST');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('branch route asks before carrying dirty changes and switches after confirmation', async () => {
+  const dir = repo();
+  try {
+    const original = git(dir, ['branch', '--show-current']);
+    git(dir, ['branch', 'dev']);
+    writeFileSync(join(dir, 'a.txt'), 'dirty\n');
+    const mounted = mount((id) => (id === 'session-1' ? { header: { cwd: dir } } : undefined));
+
+    const pending = fakeResponse();
+    await mounted.routes.get('/git-status/branch').handler(
+      request('/git-status/branch', { sessionId: 'session-1', branch: 'dev' }, 'POST'),
+      pending,
+    );
+    const pendingPayload = JSON.parse(pending.body);
+    assert.equal(pendingPayload.ok, true);
+    assert.equal(pendingPayload.value.switched, false);
+    assert.equal(pendingPayload.value.confirmationRequired, true);
+    assert.equal(pendingPayload.value.branch, 'dev');
+    assert.equal(pendingPayload.value.dirty.counts.changed, 1);
+    assert.equal(git(dir, ['branch', '--show-current']), original);
+
+    const switched = fakeResponse();
+    await mounted.routes.get('/git-status/branch').handler(
+      request(
+        '/git-status/branch',
+        { sessionId: 'session-1', branch: 'dev', allowDirty: true },
+        'POST',
+      ),
+      switched,
+    );
+    const switchedPayload = JSON.parse(switched.body);
+    assert.equal(switchedPayload.ok, true);
+    assert.equal(switchedPayload.value.switched, true);
+    assert.equal(switchedPayload.value.carriedChanges, true);
+    assert.equal(switchedPayload.value.status.branch, 'dev');
+    assert.equal(switchedPayload.value.status.counts.changed, 1);
+    assert.equal(git(dir, ['branch', '--show-current']), 'dev');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('branch route reports a structured dirty conflict without leaving the current branch', async () => {
+  const dir = repo();
+  try {
+    const original = git(dir, ['branch', '--show-current']);
+    git(dir, ['switch', '-q', '-c', 'dev']);
+    writeFileSync(join(dir, 'a.txt'), 'dev version\n');
+    git(dir, ['add', 'a.txt']);
+    git(dir, ['commit', '-qm', 'dev version']);
+    git(dir, ['switch', '-q', original]);
+    writeFileSync(join(dir, 'a.txt'), 'dirty main version\n');
+    const mounted = mount((id) => (id === 'session-1' ? { header: { cwd: dir } } : undefined));
+
+    const conflicted = fakeResponse();
+    await mounted.routes.get('/git-status/branch').handler(
+      request(
+        '/git-status/branch',
+        { sessionId: 'session-1', branch: 'dev', allowDirty: true },
+        'POST',
+      ),
+      conflicted,
+    );
+    const payload = JSON.parse(conflicted.body);
+    assert.equal(payload.ok, false);
+    assert.equal(payload.error.code, 'dirty-conflict');
+    assert.equal(payload.error.details.currentBranch, original);
+    assert.equal(payload.error.details.dirty.counts.changed, 1);
+    assert.equal(git(dir, ['branch', '--show-current']), original);
+    assert.equal(readFileSync(join(dir, 'a.txt'), 'utf8').trim(), 'dirty main version');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -35,6 +35,7 @@ window.__ModuleLoader__.load({
       'chip.error': 'Git unavailable',
       'chip.branchMenu': 'Switch branch',
       'chip.details': 'Git status details',
+      'chip.lastCommit': 'Last commit: {subject}',
       'branch.title': 'Branches',
       'branch.local': 'Local',
       'branch.search': 'Search {name} branches',
@@ -43,6 +44,16 @@ window.__ModuleLoader__.load({
       'branch.empty': 'No matching branches',
       'branch.loading': 'Loading branches…',
       'branch.current': 'Current branch',
+      'branch.latestCommit': 'Latest commit',
+      'branch.noCommits': 'No commits yet',
+      'branch.uncommittedOne': '1 uncommitted change',
+      'branch.uncommitted': '{count} uncommitted changes',
+      'branch.worktreeClean': 'No uncommitted changes',
+      'branch.carryPrompt': 'Switching to "{branch}" will carry the uncommitted changes shown here. No changes will be discarded.',
+      'branch.dirtyConflict': 'Git blocked the switch because uncommitted changes would be overwritten. Commit, stash, or discard the conflicting files first.',
+      'branch.switchAnyway': 'Switch and carry changes',
+      'branch.stay': 'Stay on {branch}',
+      'branch.moreFiles': '+{count} more',
       'popover.title': 'Git status',
       'popover.close': 'Close',
       'popover.repo': 'Repository',
@@ -86,6 +97,7 @@ window.__ModuleLoader__.load({
       'chip.error': 'Git 不可用',
       'chip.branchMenu': '切换分支',
       'chip.details': 'Git 状态详情',
+      'chip.lastCommit': '最近提交：{subject}',
       'branch.title': '分支',
       'branch.local': '本地',
       'branch.search': '搜索 {name} 分支',
@@ -94,6 +106,16 @@ window.__ModuleLoader__.load({
       'branch.empty': '没有匹配的分支',
       'branch.loading': '正在读取分支…',
       'branch.current': '当前分支',
+      'branch.latestCommit': '最近提交',
+      'branch.noCommits': '还没有提交',
+      'branch.uncommittedOne': '1 个未提交改动',
+      'branch.uncommitted': '{count} 个未提交改动',
+      'branch.worktreeClean': '没有未提交改动',
+      'branch.carryPrompt': '切换到“{branch}”时，这 {count} 个未提交改动会被带到新分支，不会被丢弃。',
+      'branch.dirtyConflict': 'Git 无法安全切换：未提交改动会被覆盖。请先提交、暂存或撤销冲突文件。',
+      'branch.switchAnyway': '携带改动并切换',
+      'branch.stay': '留在 {branch}',
+      'branch.moreFiles': '还有 {count} 个',
       'popover.title': 'Git 状态',
       'popover.close': '关闭',
       'popover.repo': '仓库',
@@ -178,9 +200,10 @@ window.__ModuleLoader__.load({
      * @param {string} sessionId - live session id.
      * @param {string} branch - local branch name.
      * @param {boolean} create - create before switching.
+     * @param {boolean} allowDirty - explicitly carry uncommitted changes.
      * @returns {Promise<object>} mutation result, including the refreshed status.
      */
-    async function changeBranch(sessionId, branch, create) {
+    async function changeBranch(sessionId, branch, create, allowDirty) {
       const response = await fetch('/git-status/branch', {
         method: 'POST',
         headers: {
@@ -188,12 +211,22 @@ window.__ModuleLoader__.load({
           'content-type': 'application/json',
         },
         cache: 'no-store',
-        body: JSON.stringify({ sessionId, branch, create: create === true }),
+        body: JSON.stringify({
+          sessionId,
+          branch,
+          create: create === true,
+          allowDirty: allowDirty === true,
+        }),
       });
       if (!response.ok) throw new Error(`Branch switch request failed (${response.status})`);
       const payload = await response.json();
       if (payload === null || typeof payload !== 'object') throw new Error('Malformed branch switch response');
-      if (!payload.ok) throw new Error(payload.error?.message ?? 'Branch switch failed');
+      if (!payload.ok) {
+        const error = new Error(payload.error?.message ?? 'Branch switch failed');
+        error.code = payload.error?.code;
+        error.details = payload.error?.details;
+        throw error;
+      }
       return payload.value;
     }
 
@@ -347,6 +380,7 @@ window.__ModuleLoader__.load({
       const [branchQuery, setBranchQuery] = React.useState('');
       const [newBranch, setNewBranch] = React.useState('');
       const [branchBusy, setBranchBusy] = React.useState('');
+      const [branchConfirmation, setBranchConfirmation] = React.useState(null);
       const [refreshing, setRefreshing] = React.useState(false);
       const rootRef = React.useRef(null);
       const buttonRef = React.useRef(null);
@@ -493,6 +527,9 @@ window.__ModuleLoader__.load({
       const titleParts = [t('chip.title', { branch: branchLabel })];
       if (changed > 0) titleParts.push(changed === 1 ? t('chip.change') : t('chip.changes', { count: changed }));
       else titleParts.push(t('chip.clean'));
+      if (status.lastCommit?.subject) {
+        titleParts.push(t('chip.lastCommit', { subject: status.lastCommit.subject }));
+      }
       if (ahead > 0) titleParts.push(t('chip.ahead', { count: ahead }));
       if (behind > 0) titleParts.push(t('chip.behind', { count: behind }));
       const title = titleParts.join(' · ');
@@ -520,7 +557,9 @@ window.__ModuleLoader__.load({
         setBranchQuery('');
         setNewBranch('');
         setBranchError('');
+        setBranchConfirmation(null);
         loadBranches();
+        refresh(true);
       };
 
       const onRefresh = () => {
@@ -530,42 +569,67 @@ window.__ModuleLoader__.load({
         });
       };
 
-      const selectBranch = async (name) => {
-        if (branchBusy !== '' || name === status.branch) return;
-        setBranchBusy(name);
+      const applyBranchChange = async (name, create, allowDirty) => {
+        const branch = name.trim();
+        if (branch === '' || branchBusy !== '') return;
+        if (!create && branch === status.branch) return;
+        setBranchBusy(create ? 'create' : branch);
         setBranchError('');
         try {
-          const result = await changeBranch(sessionId, name, false);
+          const result = await changeBranch(sessionId, branch, create, allowDirty);
           if (!aliveRef.current) return;
+          if (result?.confirmationRequired === true) {
+            setBranchConfirmation({
+              branch,
+              create,
+              dirty: result.dirty ?? {
+                counts: status.counts,
+                files: status.files,
+                truncated: status.truncated,
+              },
+              conflict: '',
+            });
+            return;
+          }
           if (result?.status !== undefined && result.status !== null) setStatus(result.status);
           setError(result?.statusError?.message ?? '');
+          setBranchConfirmation(null);
+          setBranchError('');
+          if (create) setNewBranch('');
           setMenuOpen(false);
         } catch (cause) {
           if (!aliveRef.current) return;
-          setBranchError(cause instanceof Error ? cause.message : String(cause));
+          const message = cause instanceof Error ? cause.message : String(cause);
+          if (cause?.code === 'dirty-conflict') {
+            setBranchConfirmation({
+              branch,
+              create,
+              dirty: cause.details?.dirty ?? {
+                counts: status.counts,
+                files: status.files,
+                truncated: status.truncated,
+              },
+              conflict: message,
+            });
+          } else {
+            setBranchError(message);
+          }
         } finally {
           if (aliveRef.current) setBranchBusy('');
         }
       };
 
+      const selectBranch = async (name) => applyBranchChange(name, false, false);
+
       const createBranch = async (name) => {
         const branch = name.trim();
         if (branch === '' || branchBusy !== '') return;
-        setBranchBusy('create');
-        setBranchError('');
-        try {
-          const result = await changeBranch(sessionId, branch, true);
-          if (!aliveRef.current) return;
-          if (result?.status !== undefined && result.status !== null) setStatus(result.status);
-          setError(result?.statusError?.message ?? '');
-          setNewBranch('');
-          setMenuOpen(false);
-        } catch (cause) {
-          if (!aliveRef.current) return;
-          setBranchError(cause instanceof Error ? cause.message : String(cause));
-        } finally {
-          if (aliveRef.current) setBranchBusy('');
-        }
+        await applyBranchChange(branch, true, false);
+      };
+
+      const confirmDirtyBranchChange = () => {
+        if (branchConfirmation === null || branchBusy !== '') return;
+        applyBranchChange(branchConfirmation.branch, branchConfirmation.create, true);
       };
 
       return h(
@@ -629,10 +693,13 @@ window.__ModuleLoader__.load({
               setNewBranch,
               busy: branchBusy,
               error: branchError,
+              confirmation: branchConfirmation,
               t,
               onSelect: selectBranch,
               onCreate: createBranch,
               onRetry: loadBranches,
+              onConfirm: confirmDirtyBranchChange,
+              onCancelConfirm: () => setBranchConfirmation(null),
             })
           : null,
         open
@@ -663,9 +730,12 @@ window.__ModuleLoader__.load({
       setNewBranch,
       busy,
       error,
+      confirmation,
       t,
       onSelect,
       onCreate,
+      onConfirm,
+      onCancelConfirm,
     }) {
       const needle = query.trim().toLowerCase();
       const filtered = needle === ''
@@ -673,6 +743,15 @@ window.__ModuleLoader__.load({
         : branches.filter((branch) => branch.name.toLowerCase().includes(needle));
       const current = status.branch || branches.find((branch) => branch.current)?.name || '';
       const pending = busy !== '';
+      const commit = status.lastCommit;
+      const changed = Number(status.counts?.changed) || 0;
+      const changeLabel = changed === 0
+        ? t('branch.worktreeClean')
+        : changed === 1
+          ? t('branch.uncommittedOne')
+          : t('branch.uncommitted', { count: changed });
+      const confirmCount = Number(confirmation?.dirty?.counts?.changed) || 0;
+      const confirmFiles = Array.isArray(confirmation?.dirty?.files) ? confirmation.dirty.files : [];
 
       const submitCreate = (event) => {
         event.preventDefault();
@@ -698,6 +777,45 @@ window.__ModuleLoader__.load({
             placeholder: t('branch.search', { name: status.name || t('popover.repo') }),
             onChange: (event) => setQuery(event.target.value),
           }),
+        ),
+        h(
+          'section',
+          { className: 'gs-branch-current', 'aria-label': t('branch.current') },
+          h(
+            'div',
+            { className: 'gs-branch-current-head' },
+            h('span', { className: 'gs-branch-current-label' }, t('branch.current')),
+            h(
+              'span',
+              { className: changed > 0 ? 'gs-branch-worktree gs-is-dirty' : 'gs-branch-worktree' },
+              changeLabel,
+            ),
+          ),
+          h(
+            'div',
+            { className: 'gs-branch-current-name', title: current || t('chip.unknown') },
+            current || t('chip.unknown'),
+          ),
+          h(
+            'div',
+            { className: 'gs-branch-current-commit' },
+            h('span', { className: 'gs-branch-current-label' }, t('branch.latestCommit')),
+            commit
+              ? h('code', { className: 'gs-commit-hash' }, commit.short)
+              : null,
+            h(
+              'span',
+              { className: 'gs-branch-current-subject', title: commit?.subject ?? '' },
+              commit?.subject || t('branch.noCommits'),
+            ),
+          ),
+          commit
+            ? h(
+                'div',
+                { className: 'gs-branch-current-meta' },
+                [commit.author, relativeTime(commit.date)].filter(Boolean).join(' · '),
+              )
+            : null,
         ),
         h(
           'div',
@@ -730,9 +848,19 @@ window.__ModuleLoader__.load({
                       'span',
                       { className: 'gs-branch-row-main' },
                       h('span', { className: 'gs-branch-name' }, branch.name),
-                      branch.head
-                        ? h('span', { className: 'gs-branch-meta' }, branch.head)
-                        : null,
+                      h(
+                        'span',
+                        {
+                          className: 'gs-branch-subject',
+                          title: branch.subject || (branch.name === current ? commit?.subject : '') || '',
+                        },
+                        branch.subject || (branch.name === current ? commit?.subject : '') || t('branch.noCommits'),
+                      ),
+                      h(
+                        'span',
+                        { className: 'gs-branch-meta' },
+                        [branch.head, relativeTime(branch.date)].filter(Boolean).join(' · '),
+                      ),
                     ),
                     branch.name === current
                       ? h('span', { className: 'gs-branch-check', title: t('branch.current') }, h(CheckGlyph))
@@ -740,6 +868,80 @@ window.__ModuleLoader__.load({
                   ),
                 ),
         ),
+        confirmation
+          ? h(
+              'div',
+              {
+                className: confirmation.conflict
+                  ? 'gs-branch-attention gs-branch-attention-error'
+                  : 'gs-branch-attention',
+                role: 'alert',
+              },
+              h(
+                'div',
+                { className: 'gs-branch-attention-copy', title: confirmation.conflict || '' },
+                confirmation.conflict
+                  ? t('branch.dirtyConflict')
+                  : t('branch.carryPrompt', {
+                      branch: confirmation.branch,
+                      count: confirmCount,
+                    }),
+              ),
+              confirmFiles.length > 0
+                ? h(
+                    'ul',
+                    { className: 'gs-branch-confirm-files' },
+                    ...confirmFiles.slice(0, 4).map((file, index) =>
+                      h(
+                        'li',
+                        { className: 'gs-file', key: `${file.path}:${index}` },
+                        h(
+                          'span',
+                          {
+                            className: `gs-file-badge gs-${file.kind}`,
+                            title: t(`file.${file.kind}`),
+                            'aria-label': t(`file.${file.kind}`),
+                          },
+                          file.letter,
+                        ),
+                        h('span', { className: 'gs-file-path', title: file.path }, file.path),
+                      ),
+                    ),
+                    confirmCount > 4
+                      ? h('li', { className: 'gs-branch-confirm-more' }, t('branch.moreFiles', {
+                          count: confirmCount - 4,
+                        }))
+                      : null,
+                  )
+                : null,
+              h(
+                'div',
+                { className: 'gs-branch-confirm-actions' },
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'gs-branch-cancel',
+                    disabled: pending,
+                    onClick: onCancelConfirm,
+                  },
+                  t('branch.stay', { branch: current || t('branch.current') }),
+                ),
+                confirmation.conflict
+                  ? null
+                  : h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'gs-branch-confirm-go',
+                        disabled: pending,
+                        onClick: onConfirm,
+                      },
+                      t('branch.switchAnyway'),
+                    ),
+              ),
+            )
+          : null,
         h('div', { className: 'gs-branch-divider' }),
         h(
           'form',
@@ -997,6 +1199,42 @@ window.__ModuleLoader__.load({
 .gs-branch-search input::placeholder, .gs-branch-create input::placeholder {
   color: var(--dsw-alias-label-tertiary, inherit);
 }
+.gs-branch-current {
+  margin-top: 8px; padding: 9px 10px;
+  border: 1px solid var(--dsw-alias-border-l3, rgba(128,128,128,.16));
+  border-radius: 8px;
+  background: color-mix(
+    in srgb,
+    var(--dsw-alias-bg-module-platform, rgba(127,127,127,.08)) 72%,
+    transparent
+  );
+}
+.gs-branch-current-head, .gs-branch-current-commit, .gs-branch-current-meta {
+  display: flex; align-items: center; gap: 6px; min-width: 0;
+}
+.gs-branch-current-label {
+  flex: none; color: var(--dsw-alias-label-caption, inherit);
+  font-size: 10px; line-height: 14px;
+}
+.gs-branch-worktree {
+  margin-left: auto; flex: none; color: var(--dsw-alias-state-success-primary, #4ed17e);
+  font-size: 10px; line-height: 14px;
+}
+.gs-branch-worktree.gs-is-dirty { color: var(--dsw-alias-state-warn-primary, #f59e0b); }
+.gs-branch-current-name {
+  margin-top: 2px; color: var(--dsw-alias-label-primary, inherit);
+  font: 600 13px/18px var(--dsh-font-family-code, ui-monospace, monospace);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.gs-branch-current-commit { margin-top: 5px; }
+.gs-branch-current-subject {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--dsw-alias-label-secondary, inherit); font-size: 11px;
+}
+.gs-branch-current-meta {
+  margin-top: 2px; color: var(--dsw-alias-label-tertiary, inherit);
+  font-size: 10px; line-height: 14px;
+}
 .gs-branch-heading {
   display: flex; align-items: center; gap: 6px; padding: 10px 7px 5px;
   color: var(--dsw-alias-label-tertiary, inherit); font-size: 11px;
@@ -1007,7 +1245,7 @@ window.__ModuleLoader__.load({
 }
 .gs-branch-list { max-height: 260px; overflow-y: auto; overscroll-behavior: contain; }
 .gs-branch-row {
-  box-sizing: border-box; width: 100%; min-height: 36px; padding: 5px 8px;
+  box-sizing: border-box; width: 100%; min-height: 48px; padding: 5px 8px;
   border: 0; border-radius: 7px; display: flex; align-items: center; gap: 8px;
   background: transparent; color: var(--dsw-alias-label-secondary, inherit);
   text-align: left; cursor: pointer;
@@ -1017,6 +1255,10 @@ window.__ModuleLoader__.load({
 .gs-branch-row:disabled { cursor: default; opacity: .65; }
 .gs-branch-row-main { min-width: 0; flex: 1; display: flex; flex-direction: column; }
 .gs-branch-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.gs-branch-subject {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--dsw-alias-label-secondary, inherit); font-size: 10px; line-height: 14px;
+}
 .gs-branch-meta {
   color: var(--dsw-alias-label-tertiary, inherit);
   font: 10px/14px var(--dsh-font-family-code, ui-monospace, monospace);
@@ -1025,6 +1267,44 @@ window.__ModuleLoader__.load({
   flex: none; display: inline-flex; color: var(--dsw-alias-state-business-primary, #4d93f8);
 }
 .gs-branch-state { padding: 12px 8px; color: var(--dsw-alias-label-tertiary, inherit); }
+.gs-branch-attention {
+  margin-top: 8px; padding: 9px 10px; border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--dsw-alias-state-warn-primary, #f59e0b) 34%, transparent);
+  color: var(--dsw-alias-label-secondary, inherit);
+  background: color-mix(in srgb, var(--dsw-alias-state-warn-primary, #f59e0b) 9%, transparent);
+}
+.gs-branch-attention-error {
+  border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary, #e5534b) 32%, transparent);
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #e5534b) 8%, transparent);
+}
+.gs-branch-attention-copy { font-size: 11px; line-height: 16px; }
+.gs-branch-confirm-files {
+  list-style: none; margin: 7px 0 0; padding: 0;
+  max-height: 82px; overflow-y: auto; overscroll-behavior: contain;
+}
+.gs-branch-confirm-more {
+  padding-top: 3px; color: var(--dsw-alias-label-tertiary, inherit); font-size: 10px;
+}
+.gs-branch-confirm-actions {
+  display: flex; align-items: center; justify-content: flex-end; gap: 6px; margin-top: 8px;
+}
+.gs-branch-cancel, .gs-branch-confirm-go {
+  min-height: 26px; padding: 3px 9px; border-radius: 6px; cursor: pointer;
+  font: 11px/18px var(--dsw-font-family, inherit);
+}
+.gs-branch-cancel {
+  border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.28));
+  background: transparent; color: var(--dsw-alias-label-secondary, inherit);
+}
+.gs-branch-confirm-go {
+  border: 1px solid color-mix(in srgb, var(--dsw-alias-state-warn-primary, #f59e0b) 55%, transparent);
+  background: color-mix(in srgb, var(--dsw-alias-state-warn-primary, #f59e0b) 14%, transparent);
+  color: var(--dsw-alias-label-primary, inherit);
+}
+.gs-branch-cancel:hover:not(:disabled), .gs-branch-confirm-go:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.14));
+}
+.gs-branch-cancel:disabled, .gs-branch-confirm-go:disabled { opacity: .5; cursor: default; }
 .gs-branch-divider { height: 1px; margin: 8px 0; background: var(--dsw-alias-border-l3, rgba(128,128,128,.16)); }
 .gs-branch-create {
   display: flex; align-items: center; gap: 7px; min-height: 32px; padding: 0 7px;

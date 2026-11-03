@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -130,6 +130,57 @@ test('listBranches and switchBranch list, switch and create local branches', asy
 
     const invalid = await switchBranch(dir, 'bad branch');
     assert.equal(invalid.kind, 'invalid-branch');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('switchBranch confirms before carrying uncommitted changes and preserves them', async () => {
+  const dir = createRepo();
+  try {
+    const original = git(dir, ['branch', '--show-current']);
+    git(dir, ['branch', 'dev']);
+    writeFileSync(join(dir, 'a.txt'), 'dirty\n');
+
+    const confirmation = await switchBranch(dir, 'dev');
+    assert.equal(confirmation.kind, 'confirmation-required');
+    assert.equal(confirmation.value.currentBranch, original);
+    assert.equal(confirmation.value.targetBranch, 'dev');
+    assert.equal(confirmation.value.dirty.counts.changed, 1);
+    assert.equal(confirmation.value.dirty.files[0].path, 'a.txt');
+    assert.equal(git(dir, ['branch', '--show-current']), original);
+    assert.equal(readFileSync(join(dir, 'a.txt'), 'utf8').trim(), 'dirty');
+
+    const carried = await switchBranch(dir, 'dev', { allowDirty: true });
+    assert.equal(carried.kind, 'ok');
+    assert.equal(carried.value.branch, 'dev');
+    assert.equal(carried.value.carriedChanges, true);
+    assert.equal(carried.value.dirty.counts.changed, 1);
+    assert.equal(git(dir, ['branch', '--show-current']), 'dev');
+    assert.equal(readFileSync(join(dir, 'a.txt'), 'utf8').trim(), 'dirty');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('switchBranch keeps the current branch and changes when Git reports a dirty conflict', async () => {
+  const dir = createRepo();
+  try {
+    const original = git(dir, ['branch', '--show-current']);
+    git(dir, ['switch', '-q', '-c', 'dev']);
+    writeFileSync(join(dir, 'a.txt'), 'dev version\n');
+    git(dir, ['add', 'a.txt']);
+    git(dir, ['commit', '-qm', 'dev version']);
+    git(dir, ['switch', '-q', original]);
+    writeFileSync(join(dir, 'a.txt'), 'dirty main version\n');
+
+    const conflict = await switchBranch(dir, 'dev', { allowDirty: true });
+    assert.equal(conflict.kind, 'dirty-conflict');
+    assert.match(conflict.message, /local changes|overwritten/i);
+    assert.equal(conflict.value.currentBranch, original);
+    assert.equal(conflict.value.dirty.counts.changed, 1);
+    assert.equal(git(dir, ['branch', '--show-current']), original);
+    assert.equal(readFileSync(join(dir, 'a.txt'), 'utf8').trim(), 'dirty main version');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
